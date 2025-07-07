@@ -7,12 +7,13 @@ import numpy as np
 from telethon import TelegramClient
 from streamlit_autorefresh import st_autorefresh
 import asyncio
+import plotly.graph_objects as go
 
 # Auto-refresh every 60 seconds
 st_autorefresh(interval=60000, limit=None, key="datarefresh")
 
 # --- Configurations ---
-TRADINGVIEW_XAUUSD_FEED = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=15min&apikey={st.secrets['TWELVEDATA_API_KEY']}"
+TRADINGVIEW_XAUUSD_FEED = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=1week&apikey={st.secrets['TWELVEDATA_API_KEY']}"
 NEWS_API_KEY = st.secrets["NEWS_API_KEY"]
 NEWS_API_URL = f"https://newsapi.org/v2/everything?q=gold+OR+XAUUSD&language=en&sortBy=publishedAt&apiKey={NEWS_API_KEY}"
 
@@ -85,21 +86,21 @@ async def fetch_telegram_signal():
             msg = message.message.upper()
             if 'XAUUSD' in msg:
                 if 'BUY' in msg:
-                    return 'buy'
+                    return 'buy', message.sender_id, message.message  # Return signal, sender ID, and message content
                 elif 'SELL' in msg:
-                    return 'sell'
+                    return 'sell', message.sender_id, message.message
                 elif 'WAIT' in msg or 'AVOID' in msg:
-                    return 'uncertain'
-        return 'uncertain'
+                    return 'uncertain', message.sender_id, message.message
+        return 'uncertain', None, "No relevant messages found"
     except Exception as e:
-        return f"error: {e}"
+        return f"error: {e}", None, ""
 
 def get_latest_telegram_signal():
     loop = asyncio.new_event_loop()  # Create a new event loop
     asyncio.set_event_loop(loop)  # Set it as the current event loop
-    signal = loop.run_until_complete(fetch_telegram_signal())  # Run the async function
+    signal, sender, message = loop.run_until_complete(fetch_telegram_signal())  # Run the async function
     loop.close()  # Close the loop after use
-    return signal
+    return signal, sender, message
 
 # --- Signal Classification ---
 def classify_signal(rsi, macd_hist, news_sentiment, telegram_signal):
@@ -113,27 +114,55 @@ def classify_signal(rsi, macd_hist, news_sentiment, telegram_signal):
 # --- Streamlit UI ---
 st.title("📈 XAU/USD AI Signal Bot")
 
+# Fetch Chart Data
 chart_data = fetch_chart_data()
 if chart_data.empty:
     st.error("❌ Failed to fetch chart data.")
     st.stop()
 
-st.subheader("Live Price (15-min)")
-st.line_chart(chart_data.set_index('date')['close'])
+# --- Candlestick Chart ---
+fig = go.Figure(data=[go.Candlestick(
+    x=chart_data['date'],
+    open=chart_data['open'],
+    high=chart_data['high'],
+    low=chart_data['low'],
+    close=chart_data['close'],
+    name="Candlestick"
+)])
 
+fig.update_layout(
+    title="XAU/USD Candlestick Chart (Weekly)",
+    xaxis_title="Date",
+    yaxis_title="Price (USD)",
+    xaxis_rangeslider_visible=False
+)
+
+st.plotly_chart(fig)
+
+# Technical Indicators
 indicators = analyze_technical_indicators(chart_data)
 st.write(f"**RSI**: {indicators['RSI']:.2f}")
 st.write(f"**MACD Histogram**: {indicators['MACD_HIST']:.4f}")
 
+# Fetch News Sentiment
 articles = fetch_news()
 sentiment_score = analyze_news_sentiment(articles)
 st.write(f"**News Sentiment Score**: {sentiment_score:.3f}")
 
-telegram_signal = get_latest_telegram_signal()
+# Fetch Telegram Signal and Latest Message
+telegram_signal, sender, telegram_message = get_latest_telegram_signal()
 st.write(f"**Telegram Signal:** {telegram_signal.capitalize()}")
 
+if sender is not None:
+    st.write(f"**Telegram Sender:** {sender}")
+    st.write(f"**Telegram Message:** {telegram_message}")
+else:
+    st.warning("❗️ No relevant signal found in recent messages.")
+
+# Classify Signal
 signal = classify_signal(indicators['RSI'], indicators['MACD_HIST'], sentiment_score, telegram_signal)
 
+# Display AI Decision
 st.header(f"🚦 Trade Decision: {signal}")
 if signal == "Trade":
     st.success("✅ Conditions look good for trading.")
