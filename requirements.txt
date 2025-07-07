@@ -1,7 +1,8 @@
 streamlit
 requests
-textblob
 pandas
 numpy
 telethon
+streamlit-autorefresh
 plotly
+openai
