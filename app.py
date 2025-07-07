@@ -20,7 +20,7 @@ NEWS_API_URL = f"https://newsapi.org/v2/everything?q=gold+OR+XAUUSD&language=en&
 # Telegram API credentials
 TELEGRAM_API_ID = int(st.secrets["TELEGRAM_API_ID"])
 TELEGRAM_API_HASH = st.secrets["TELEGRAM_API_HASH"]
-TELEGRAM_CHANNEL = 'gary_thetrader'  # Without @
+TELEGRAM_CHANNEL = 'Gary_TheTrader'  # Updated channel username without @
 
 # --- Functions ---
 
@@ -86,13 +86,14 @@ async def fetch_telegram_signal():
         channel = await client.get_entity(TELEGRAM_CHANNEL)
         messages = await client.get_messages(channel, limit=10)
         
-        # Look for relevant XAUUSD signals
+        st.write(f"Channel info: {channel}")  # Debugging: Channel info
         for message in messages:
             msg = message.message.upper()
+            st.write(f"Fetched message: {message.message}")  # Debugging: Show each message
             if 'XAUUSD' in msg:
                 if 'BUY' in msg:
                     await client.disconnect()  # Close the connection after fetching
-                    return 'buy', message.sender_id, message.message  # Return signal, sender ID, and message content
+                    return 'buy', message.sender_id, message.message
                 elif 'SELL' in msg:
                     await client.disconnect()  # Close the connection after fetching
                     return 'sell', message.sender_id, message.message
