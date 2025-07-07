@@ -1,7 +1,6 @@
 import streamlit as st
 import requests
 from textblob import TextBlob
-from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 from telethon import TelegramClient
@@ -20,7 +19,7 @@ NEWS_API_URL = f"https://newsapi.org/v2/everything?q=gold+OR+XAUUSD&language=en&
 # Telegram API credentials
 TELEGRAM_API_ID = int(st.secrets["TELEGRAM_API_ID"])
 TELEGRAM_API_HASH = st.secrets["TELEGRAM_API_HASH"]
-TELEGRAM_CHANNEL = 'Gary_TheTrader'  # Updated channel username without @
+TELEGRAM_CHANNEL = 'Gary_TheTrader'  # Channel username without @
 
 # --- Functions ---
 
@@ -75,44 +74,44 @@ def analyze_news_sentiment(articles):
         sentiment_scores.append(sentiment)
     return np.mean(sentiment_scores) if sentiment_scores else 0
 
-# --- Telegram Signal Fetching with Event Loop Fix ---
+# --- Telegram Signal Fetching (last 50 messages, newest first) ---
 async def fetch_telegram_signal():
     try:
-        # Create the Telegram Client
         client = TelegramClient('session_gary', TELEGRAM_API_ID, TELEGRAM_API_HASH)
         await client.start()
 
-        # Access the channel and get the last 10 messages
         channel = await client.get_entity(TELEGRAM_CHANNEL)
-        messages = await client.get_messages(channel, limit=10)
-        
-        st.write(f"Channel info: {channel}")  # Debugging: Channel info
+        messages = await client.get_messages(channel, limit=50)  # last 50 messages
+
+        st.write(f"Channel info: {channel}")  # Debug info
+
         for message in messages:
-            msg = message.message.upper()
-            st.write(f"Fetched message: {message.message}")  # Debugging: Show each message
-            if 'XAUUSD' in msg:
-                if 'BUY' in msg:
-                    await client.disconnect()  # Close the connection after fetching
+            if message.message:
+                msg = message.message.upper()
+                st.write(f"Checking message: {message.message}")
+
+                if 'GOLD BUY NOW' in msg:
+                    await client.disconnect()
                     return 'buy', message.sender_id, message.message
-                elif 'SELL' in msg:
-                    await client.disconnect()  # Close the connection after fetching
+                elif 'GOLD SELL NOW' in msg:
+                    await client.disconnect()
                     return 'sell', message.sender_id, message.message
                 elif 'WAIT' in msg or 'AVOID' in msg:
-                    await client.disconnect()  # Close the connection after fetching
+                    await client.disconnect()
                     return 'uncertain', message.sender_id, message.message
-        await client.disconnect()  # Close the connection if no relevant signal is found
+
+        await client.disconnect()
         return 'uncertain', None, "No relevant messages found"
     except Exception as e:
         return f"error: {e}", None, ""
 
 def get_latest_telegram_signal():
-    loop = asyncio.new_event_loop()  # Create a new event loop
-    asyncio.set_event_loop(loop)  # Set it as the current event loop
-    signal, sender, message = loop.run_until_complete(fetch_telegram_signal())  # Run the async function
-    loop.close()  # Close the loop after use
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    signal, sender, message = loop.run_until_complete(fetch_telegram_signal())
+    loop.close()
     return signal, sender, message
 
-# --- Signal Classification ---
 def classify_signal(rsi, macd_hist, news_sentiment, telegram_signal):
     if rsi < 30 and macd_hist > 0 and news_sentiment > 0.2 and telegram_signal == "buy":
         return "Trade"
@@ -130,7 +129,7 @@ if chart_data.empty:
     st.error("❌ Failed to fetch chart data.")
     st.stop()
 
-# --- Candlestick Chart ---
+# Candlestick chart - weekly
 fig = go.Figure(data=[go.Candlestick(
     x=chart_data['date'],
     open=chart_data['open'],
@@ -139,14 +138,12 @@ fig = go.Figure(data=[go.Candlestick(
     close=chart_data['close'],
     name="Candlestick"
 )])
-
 fig.update_layout(
     title="XAU/USD Candlestick Chart (Weekly)",
     xaxis_title="Date",
     yaxis_title="Price (USD)",
     xaxis_rangeslider_visible=False
 )
-
 st.plotly_chart(fig)
 
 # Technical Indicators
@@ -159,21 +156,22 @@ articles = fetch_news()
 sentiment_score = analyze_news_sentiment(articles)
 st.write(f"**News Sentiment Score**: {sentiment_score:.3f}")
 
-# Fetch Telegram Signal and Latest Message
+# Fetch Telegram Signal and show message
 telegram_signal, sender, telegram_message = get_latest_telegram_signal()
-st.write(f"**Telegram Signal:** {telegram_signal.capitalize()}")
 
-if sender is not None:
-    st.write(f"**Telegram Sender:** {sender}")
-    st.write(f"**Telegram Message:** {telegram_message}")
+if telegram_signal.startswith("error"):
+    st.error(f"Telegram Signal Error: {telegram_signal}")
 else:
-    st.warning("❗️ No relevant signal found in recent messages.")
+    st.write(f"**Telegram Signal:** {telegram_signal.capitalize()}")
+    if sender is not None:
+        st.write(f"**Telegram Message:** {telegram_message}")
+    else:
+        st.warning("❗️ No relevant signal found in recent messages.")
 
-# Classify Signal
+# Final trade decision
 signal = classify_signal(indicators['RSI'], indicators['MACD_HIST'], sentiment_score, telegram_signal)
-
-# Display AI Decision
 st.header(f"🚦 Trade Decision: {signal}")
+
 if signal == "Trade":
     st.success("✅ Conditions look good for trading.")
 elif signal == "Risk":
