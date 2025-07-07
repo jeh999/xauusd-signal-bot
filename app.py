@@ -178,10 +178,20 @@ def log_signal(signal, rsi, macd, price, decision, confidence):
         row.to_csv(LOG_FILE, index=False)
 
 def show_signal_history():
-    if os.path.exists(LOG_FILE):
+    if not os.path.exists(LOG_FILE):
+        st.info("No signal history yet.")
+        return
+    try:
         df = pd.read_csv(LOG_FILE)
+        if df.empty:
+            st.info("Signal history is empty.")
+            return
         st.subheader("📜 Signal History (Last 10)")
         st.dataframe(df.tail(10))
+    except pd.errors.EmptyDataError:
+        st.info("Signal history file is empty.")
+    except Exception as e:
+        st.error(f"Error reading signal history: {e}")
 
 # --- Streamlit UI ---
 
