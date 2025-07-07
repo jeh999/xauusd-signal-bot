@@ -1,25 +1,28 @@
 import streamlit as st
 import requests
 from textblob import TextBlob
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
-from telethon.sync import TelegramClient
+from telethon import TelegramClient
 from streamlit_autorefresh import st_autorefresh
+import asyncio
 
 # Auto-refresh every 60 seconds
 st_autorefresh(interval=60000, limit=None, key="datarefresh")
 
-# --- API Config ---
+# --- Configurations ---
 TRADINGVIEW_XAUUSD_FEED = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=15min&apikey={st.secrets['TWELVEDATA_API_KEY']}"
-NEWS_API_URL = f"https://newsapi.org/v2/everything?q=gold+OR+XAUUSD&language=en&sortBy=publishedAt&apiKey={st.secrets['NEWS_API_KEY']}"
+NEWS_API_KEY = st.secrets["NEWS_API_KEY"]
+NEWS_API_URL = f"https://newsapi.org/v2/everything?q=gold+OR+XAUUSD&language=en&sortBy=publishedAt&apiKey={NEWS_API_KEY}"
 
-# Telegram setup
+# Telegram API credentials
 TELEGRAM_API_ID = int(st.secrets["TELEGRAM_API_ID"])
 TELEGRAM_API_HASH = st.secrets["TELEGRAM_API_HASH"]
-TELEGRAM_CHANNEL = 'gary_thetrader'  # No '@'
+TELEGRAM_CHANNEL = 'gary_thetrader'  # Without @
 
 # --- Functions ---
+
 def fetch_chart_data():
     response = requests.get(TRADINGVIEW_XAUUSD_FEED)
     data = response.json()
@@ -60,42 +63,49 @@ def analyze_technical_indicators(df):
 
 def fetch_news():
     response = requests.get(NEWS_API_URL)
-    return response.json().get('articles', [])[:5]
+    articles = response.json().get('articles', [])[:5]
+    return articles
 
 def analyze_news_sentiment(articles):
-    scores = []
+    sentiment_scores = []
     for article in articles:
-        content = article.get('title', '') + " " + article.get('description', '')
-        polarity = TextBlob(content).sentiment.polarity
-        scores.append(polarity)
-    return np.mean(scores) if scores else 0
+        content = article.get('title', '') + ". " + article.get('description', '')
+        sentiment = TextBlob(content).sentiment.polarity
+        sentiment_scores.append(sentiment)
+    return np.mean(sentiment_scores) if sentiment_scores else 0
 
-def get_latest_telegram_signal():
+# --- Telegram Signal Fetching with Event Loop Fix ---
+async def fetch_telegram_signal():
     try:
         client = TelegramClient('session_gary', TELEGRAM_API_ID, TELEGRAM_API_HASH)
-        client.connect()
-        if not client.is_user_authorized():
-            return 'uncertain'
-        channel = client.get_entity(TELEGRAM_CHANNEL)
-        messages = client.get_messages(channel, limit=10)
-        for msg in messages:
-            content = msg.message.upper()
-            if 'XAUUSD' in content:
-                if 'BUY' in content:
+        await client.start()
+        channel = await client.get_entity(TELEGRAM_CHANNEL)
+        messages = await client.get_messages(channel, limit=10)
+        for message in messages:
+            msg = message.message.upper()
+            if 'XAUUSD' in msg:
+                if 'BUY' in msg:
                     return 'buy'
-                elif 'SELL' in content:
+                elif 'SELL' in msg:
                     return 'sell'
-                elif 'WAIT' in content or 'AVOID' in content:
+                elif 'WAIT' in msg or 'AVOID' in msg:
                     return 'uncertain'
         return 'uncertain'
     except Exception as e:
-        st.warning(f"Failed to fetch Telegram signal: {e}")
-        return 'uncertain'
+        return f"error: {e}"
 
-def classify_signal(rsi, macd_hist, sentiment, telegram_signal):
-    if rsi < 30 and macd_hist > 0 and sentiment > 0.2 and telegram_signal == 'buy':
+def get_latest_telegram_signal():
+    loop = asyncio.new_event_loop()  # Create a new event loop
+    asyncio.set_event_loop(loop)  # Set it as the current event loop
+    signal = loop.run_until_complete(fetch_telegram_signal())  # Run the async function
+    loop.close()  # Close the loop after use
+    return signal
+
+# --- Signal Classification ---
+def classify_signal(rsi, macd_hist, news_sentiment, telegram_signal):
+    if rsi < 30 and macd_hist > 0 and news_sentiment > 0.2 and telegram_signal == "buy":
         return "Trade"
-    elif telegram_signal == "uncertain" or abs(sentiment) < 0.1:
+    elif telegram_signal == "uncertain" or abs(news_sentiment) < 0.1:
         return "Risk"
     else:
         return "Don't Trade"
@@ -116,48 +126,18 @@ st.write(f"**RSI**: {indicators['RSI']:.2f}")
 st.write(f"**MACD Histogram**: {indicators['MACD_HIST']:.4f}")
 
 articles = fetch_news()
-sentiment = analyze_news_sentiment(articles)
-st.write(f"**News Sentiment Score**: {sentiment:.3f}")
+sentiment_score = analyze_news_sentiment(articles)
+st.write(f"**News Sentiment Score**: {sentiment_score:.3f}")
 
 telegram_signal = get_latest_telegram_signal()
 st.write(f"**Telegram Signal:** {telegram_signal.capitalize()}")
 
-decision = classify_signal(indicators['RSI'], indicators['MACD_HIST'], sentiment, telegram_signal)
+signal = classify_signal(indicators['RSI'], indicators['MACD_HIST'], sentiment_score, telegram_signal)
 
-st.header(f"🚦 Trade Decision: {decision}")
-if decision == "Trade":
+st.header(f"🚦 Trade Decision: {signal}")
+if signal == "Trade":
     st.success("✅ Conditions look good for trading.")
-elif decision == "Risk":
+elif signal == "Risk":
     st.warning("⚠️ Risky. Mixed or weak signals.")
 else:
     st.error("❌ Avoid trading now.")
-import asyncio
-from telethon import TelegramClient
-
-# Updated async code for fetching Telegram signal
-async def fetch_telegram_signal():
-    try:
-        client = TelegramClient('session_gary', TELEGRAM_API_ID, TELEGRAM_API_HASH)
-        await client.start()
-        channel = await client.get_entity(TELEGRAM_CHANNEL)
-        messages = await client.get_messages(channel, limit=10)
-        for message in messages:
-            msg = message.message.upper()
-            if 'XAUUSD' in msg:
-                if 'BUY' in msg:
-                    return 'buy'
-                elif 'SELL' in msg:
-                    return 'sell'
-                elif 'WAIT' in msg or 'AVOID' in msg:
-                    return 'uncertain'
-        return 'uncertain'
-    except Exception as e:
-        return f"error: {e}"
-
-# New function that properly manages the event loop
-def get_latest_telegram_signal():
-    loop = asyncio.new_event_loop()  # Create a new event loop
-    asyncio.set_event_loop(loop)  # Set it as the current event loop
-    signal = loop.run_until_complete(fetch_telegram_signal())  # Run the async function
-    loop.close()  # Close the loop after use
-    return signal
