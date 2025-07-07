@@ -182,8 +182,7 @@ def show_signal_history():
         st.info("No signal history yet.")
         return
     try:
-        # Robust read, skip bad lines if any
-        df = pd.read_csv(LOG_FILE, error_bad_lines=False, warn_bad_lines=True)
+        df = pd.read_csv(LOG_FILE, on_bad_lines='skip')
         if df.empty:
             st.info("Signal history is empty.")
             return
