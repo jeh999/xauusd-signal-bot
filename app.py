@@ -78,19 +78,28 @@ def analyze_news_sentiment(articles):
 # --- Telegram Signal Fetching with Event Loop Fix ---
 async def fetch_telegram_signal():
     try:
+        # Create the Telegram Client
         client = TelegramClient('session_gary', TELEGRAM_API_ID, TELEGRAM_API_HASH)
         await client.start()
+
+        # Access the channel and get the last 10 messages
         channel = await client.get_entity(TELEGRAM_CHANNEL)
         messages = await client.get_messages(channel, limit=10)
+        
+        # Look for relevant XAUUSD signals
         for message in messages:
             msg = message.message.upper()
             if 'XAUUSD' in msg:
                 if 'BUY' in msg:
+                    await client.disconnect()  # Close the connection after fetching
                     return 'buy', message.sender_id, message.message  # Return signal, sender ID, and message content
                 elif 'SELL' in msg:
+                    await client.disconnect()  # Close the connection after fetching
                     return 'sell', message.sender_id, message.message
                 elif 'WAIT' in msg or 'AVOID' in msg:
+                    await client.disconnect()  # Close the connection after fetching
                     return 'uncertain', message.sender_id, message.message
+        await client.disconnect()  # Close the connection if no relevant signal is found
         return 'uncertain', None, "No relevant messages found"
     except Exception as e:
         return f"error: {e}", None, ""
