@@ -10,12 +10,12 @@ import asyncio
 import plotly.graph_objects as go
 import openai
 
-# Set OpenAI API key
+# Set OpenAI API key from secrets
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 # Auto-refresh: price every 10 seconds, full data every 60 seconds
-price_refresh = st_autorefresh(interval=10000, limit=None, key="price_refresh")
-data_refresh = st_autorefresh(interval=60000, limit=None, key="data_refresh")
+st_autorefresh(interval=10000, limit=None, key="price_refresh")
+st_autorefresh(interval=60000, limit=None, key="data_refresh")
 
 # Configs and secrets
 TWELVEDATA_API_KEY = st.secrets["TWELVEDATA_API_KEY"]
@@ -24,10 +24,8 @@ TELEGRAM_API_ID = int(st.secrets["TELEGRAM_API_ID"])
 TELEGRAM_API_HASH = st.secrets["TELEGRAM_API_HASH"]
 TELEGRAM_CHANNEL = 'Gary_TheTrader'  # without @
 
-# Log file for signals
 LOG_FILE = "signal_history.csv"
 
-# Fetch live price from Twelve Data (near real-time)
 def fetch_latest_xauusd_price():
     url = f"https://api.twelvedata.com/price?symbol=XAU/USD&apikey={TWELVEDATA_API_KEY}"
     try:
@@ -37,7 +35,6 @@ def fetch_latest_xauusd_price():
     except Exception:
         return None
 
-# Fetch historical chart data (weekly candles) from Twelve Data
 def fetch_weekly_chart_data():
     url = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=1week&apikey={TWELVEDATA_API_KEY}&outputsize=50"
     try:
@@ -54,7 +51,6 @@ def fetch_weekly_chart_data():
     except Exception:
         return pd.DataFrame()
 
-# Calculate RSI
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = delta.clip(lower=0)
@@ -65,7 +61,6 @@ def calculate_rsi(series, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
-# Calculate MACD histogram
 def calculate_macd(series):
     exp1 = series.ewm(span=12, adjust=False).mean()
     exp2 = series.ewm(span=26, adjust=False).mean()
@@ -73,14 +68,12 @@ def calculate_macd(series):
     signal = macd.ewm(span=9, adjust=False).mean()
     return macd - signal
 
-# Analyze technical indicators
 def analyze_technical_indicators(df):
     df['RSI'] = calculate_rsi(df['close'])
     df['MACD_HIST'] = calculate_macd(df['close'])
     last = df.iloc[-1]
     return last['RSI'], last['MACD_HIST']
 
-# Fetch latest news articles about gold/XAUUSD
 def fetch_news():
     url = f"https://newsapi.org/v2/everything?q=gold OR XAUUSD&language=en&sortBy=publishedAt&apiKey={NEWS_API_KEY}"
     try:
@@ -90,7 +83,6 @@ def fetch_news():
     except Exception:
         return []
 
-# Analyze news sentiment via TextBlob
 def analyze_news_sentiment(articles):
     sentiments = []
     for art in articles:
@@ -99,13 +91,12 @@ def analyze_news_sentiment(articles):
         sentiments.append(sentiment)
     return np.mean(sentiments) if sentiments else 0
 
-# Fetch latest Telegram signal from channel containing "Gold Buy now" or "Gold Sell now"
 async def fetch_telegram_signal():
     try:
         client = TelegramClient('session', TELEGRAM_API_ID, TELEGRAM_API_HASH)
         await client.start()
         channel = await client.get_entity(TELEGRAM_CHANNEL)
-        messages = await client.get_messages(channel, limit=20)
+        messages = await client.get_messages(channel, limit=30)
         for msg in messages:
             text = msg.message.lower()
             if "gold buy now" in text:
@@ -123,7 +114,6 @@ def get_telegram_signal_sync():
     loop.close()
     return signal, full_msg, dt
 
-# Classify final trade decision
 def classify_trade(rsi, macd_hist, news_sentiment, telegram_signal):
     if telegram_signal == "error":
         return "Error fetching Telegram signal"
@@ -132,7 +122,6 @@ def classify_trade(rsi, macd_hist, news_sentiment, telegram_signal):
     if telegram_signal == "sell" and rsi > 30 and macd_hist < 0 and news_sentiment < -0.1:
         return "Trade"
     if telegram_signal == "none":
-        # Use other indicators only if no telegram signal
         if rsi < 30 and macd_hist > 0 and news_sentiment > 0.2:
             return "Trade"
         elif abs(news_sentiment) < 0.1:
@@ -141,7 +130,6 @@ def classify_trade(rsi, macd_hist, news_sentiment, telegram_signal):
             return "Don't Trade"
     return "Risk"
 
-# Display candlestick chart with Plotly
 def plot_candles(df):
     fig = go.Figure(data=[go.Candlestick(
         x=df['datetime'],
@@ -152,7 +140,6 @@ def plot_candles(df):
     fig.update_layout(title="XAU/USD Weekly Candle Chart", xaxis_title="Date", yaxis_title="Price (USD)")
     st.plotly_chart(fig, use_container_width=True)
 
-# Log signals to CSV
 def log_signal(decision, telegram_msg, dt):
     import os
     import csv
@@ -163,7 +150,6 @@ def log_signal(decision, telegram_msg, dt):
             writer.writerow(["timestamp", "decision", "telegram_msg"])
         writer.writerow([dt or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), decision, telegram_msg or ""])
 
-# Show signal history
 def show_signal_history():
     import os
     if not os.path.isfile(LOG_FILE):
@@ -176,7 +162,6 @@ def show_signal_history():
     st.subheader("Signal History")
     st.dataframe(df.sort_values(by="timestamp", ascending=False))
 
-# Use OpenAI to generate a summary of news articles
 def generate_news_summary(articles):
     if not articles:
         return "No recent news available."
@@ -194,9 +179,8 @@ def generate_news_summary(articles):
     except Exception as e:
         return f"OpenAI API error: {e}"
 
-# ========== Streamlit App UI ==========
-
-st.title("🚀 XAU/USD AI Signal Bot Plus")
+# === Streamlit UI ===
+st.title("🚀 XAU/USD AI Signal Bot")
 
 # Live price
 price = fetch_latest_xauusd_price()
@@ -205,7 +189,7 @@ if price:
 else:
     st.warning("Failed to fetch live XAU/USD price")
 
-# Chart data and chart
+# Weekly candle chart
 chart_data = fetch_weekly_chart_data()
 if chart_data.empty:
     st.error("Failed to fetch weekly chart data.")
@@ -217,16 +201,12 @@ rsi, macd_hist = analyze_technical_indicators(chart_data)
 st.write(f"**RSI:** {rsi:.2f}")
 st.write(f"**MACD Histogram:** {macd_hist:.4f}")
 
-# News and sentiment
+# News sentiment (no headlines)
 news_articles = fetch_news()
 sentiment = analyze_news_sentiment(news_articles)
 st.write(f"**News Sentiment Score:** {sentiment:.3f}")
 
-with st.expander("Recent News Headlines"):
-    for art in news_articles:
-        st.markdown(f"- [{art['title']}]({art['url']})")
-
-# OpenAI news summary
+# OpenAI news summary (optional, comment out if undesired)
 with st.expander("AI Generated News Summary"):
     summary = generate_news_summary(news_articles)
     st.write(summary)
@@ -247,9 +227,9 @@ else:
 decision = classify_trade(rsi, macd_hist, sentiment, telegram_signal)
 st.header(f"AI Trade Decision: {decision}")
 
-# Log decision to CSV
+# Log decision
 log_signal(decision, telegram_msg, telegram_dt)
 
-# Show history if user wants
+# Show history checkbox
 if st.checkbox("Show signal history"):
     show_signal_history()
