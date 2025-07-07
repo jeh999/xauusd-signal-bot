@@ -111,7 +111,7 @@ def gpt_validate_signal(message):
         "Is this a clear, reliable trading signal? Provide a short rationale."
     )
     try:
-        response = openai.ChatCompletion.create(
+        response = openai.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=60,
@@ -182,7 +182,8 @@ def show_signal_history():
         st.info("No signal history yet.")
         return
     try:
-        df = pd.read_csv(LOG_FILE)
+        # Robust read, skip bad lines if any
+        df = pd.read_csv(LOG_FILE, error_bad_lines=False, warn_bad_lines=True)
         if df.empty:
             st.info("Signal history is empty.")
             return
@@ -252,4 +253,5 @@ else:
 
     # Log signal for history
     log_signal(signal, rsi, macd_hist, price, decision, confidence)
-    show_signal_history()
+
+show_signal_history()
