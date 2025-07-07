@@ -81,14 +81,11 @@ async def fetch_telegram_signal():
         await client.start()
 
         channel = await client.get_entity(TELEGRAM_CHANNEL)
-        messages = await client.get_messages(channel, limit=50)  # last 50 messages
-
-        st.write(f"Channel info: {channel}")  # Debug info
+        messages = await client.get_messages(channel, limit=50)
 
         for message in messages:
             if message.message:
                 msg = message.message.upper()
-                st.write(f"Checking message: {message.message}")
 
                 if 'GOLD BUY NOW' in msg:
                     await client.disconnect()
@@ -96,14 +93,11 @@ async def fetch_telegram_signal():
                 elif 'GOLD SELL NOW' in msg:
                     await client.disconnect()
                     return 'sell', message.sender_id, message.message
-                elif 'WAIT' in msg or 'AVOID' in msg:
-                    await client.disconnect()
-                    return 'uncertain', message.sender_id, message.message
 
         await client.disconnect()
-        return 'uncertain', None, "No relevant messages found"
+        return 'uncertain', None, None
     except Exception as e:
-        return f"error: {e}", None, ""
+        return f"error: {e}", None, None
 
 def get_latest_telegram_signal():
     loop = asyncio.new_event_loop()
@@ -156,17 +150,16 @@ articles = fetch_news()
 sentiment_score = analyze_news_sentiment(articles)
 st.write(f"**News Sentiment Score**: {sentiment_score:.3f}")
 
-# Fetch Telegram Signal and show message
+# Fetch Telegram Signal and show only if 'Gold Buy now' or 'Gold Sell now' found
 telegram_signal, sender, telegram_message = get_latest_telegram_signal()
 
 if telegram_signal.startswith("error"):
     st.error(f"Telegram Signal Error: {telegram_signal}")
+elif telegram_signal == 'uncertain' or telegram_message is None:
+    st.warning("❗️ No 'Gold Buy now' or 'Gold Sell now' signal found in recent messages.")
 else:
     st.write(f"**Telegram Signal:** {telegram_signal.capitalize()}")
-    if sender is not None:
-        st.write(f"**Telegram Message:** {telegram_message}")
-    else:
-        st.warning("❗️ No relevant signal found in recent messages.")
+    st.write(f"**Telegram Message:** {telegram_message}")
 
 # Final trade decision
 signal = classify_signal(indicators['RSI'], indicators['MACD_HIST'], sentiment_score, telegram_signal)
