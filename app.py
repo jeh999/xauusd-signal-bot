@@ -1,6 +1,5 @@
 import streamlit as st
 import requests
-from textblob import TextBlob
 import pandas as pd
 import numpy as np
 from telethon import TelegramClient
@@ -8,29 +7,37 @@ from streamlit_autorefresh import st_autorefresh
 import asyncio
 import plotly.graph_objects as go
 import re
-import os
 from datetime import datetime, timezone
+import openai
+import os
 
+# Auto-refresh every 60 seconds
 st_autorefresh(interval=60000, limit=None, key="datarefresh")
 
-# --- Configurations ---
-TRADINGVIEW_XAUUSD_FEED_WEEKLY = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=1week&apikey={st.secrets['TWELVEDATA_API_KEY']}"
-TRADINGVIEW_XAUUSD_FEED_HOURLY = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=1h&apikey={st.secrets['TWELVEDATA_API_KEY']}"
-
+# Load API keys from Streamlit secrets
+TWELVEDATA_API_KEY = st.secrets["TWELVEDATA_API_KEY"]
 TELEGRAM_API_ID = int(st.secrets["TELEGRAM_API_ID"])
 TELEGRAM_API_HASH = st.secrets["TELEGRAM_API_HASH"]
-TELEGRAM_CHANNEL = 'Gary_TheTrader'
+TELEGRAM_CHANNEL = 'Gary_TheTrader'  # without @
+OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+openai.api_key = OPENAI_API_KEY
 
-log_file = "signal_log.csv"
+# API URLs
+TWELVEDATA_WEEKLY = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=1week&apikey={TWELVEDATA_API_KEY}"
+TWELVEDATA_HOURLY = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=1h&apikey={TWELVEDATA_API_KEY}"
 
-# --- Functions ---
+# Log file for signals
+LOG_FILE = "signal_log.csv"
+
+# --- Technical analysis functions ---
+
 def fetch_chart_data(url):
-    response = requests.get(url)
-    data = response.json()
+    res = requests.get(url)
+    data = res.json()
     if 'values' not in data:
         return pd.DataFrame()
     df = pd.DataFrame(data['values'])
-    df = df.rename(columns={"datetime": "date", "close": "close", "open": "open", "high": "high", "low": "low"})
+    df.rename(columns={"datetime": "date"}, inplace=True)
     df['date'] = pd.to_datetime(df['date'])
     df = df.sort_values('date')
     for col in ['open', 'high', 'low', 'close']:
@@ -41,26 +48,27 @@ def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=period).mean()
-    avg_loss = loss.rolling(window=period).mean()
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
     rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def calculate_macd(series):
-    exp1 = series.ewm(span=12, adjust=False).mean()
-    exp2 = series.ewm(span=26, adjust=False).mean()
-    macd = exp1 - exp2
+    exp12 = series.ewm(span=12, adjust=False).mean()
+    exp26 = series.ewm(span=26, adjust=False).mean()
+    macd = exp12 - exp26
     signal = macd.ewm(span=9, adjust=False).mean()
-    return macd - signal
+    macd_hist = macd - signal
+    return macd_hist
 
 def analyze_technical_indicators(df):
     df['RSI'] = calculate_rsi(df['close'])
     df['MACD_HIST'] = calculate_macd(df['close'])
     last = df.iloc[-1]
-    return {
-        'RSI': last['RSI'],
-        'MACD_HIST': last['MACD_HIST']
-    }
+    return last['RSI'], last['MACD_HIST']
+
+# --- Telegram functions ---
 
 async def fetch_telegram_signal():
     try:
@@ -69,88 +77,169 @@ async def fetch_telegram_signal():
         channel = await client.get_entity(TELEGRAM_CHANNEL)
         messages = await client.get_messages(channel, limit=50)
 
-        for message in messages:
-            if message.message:
-                msg = message.message.upper()
-                if 'GOLD BUY NOW' in msg or 'GOLD SELL NOW' in msg:
-                    price = None
-                    match = re.search(r"@ ?([\d.]+)", msg)
-                    if match:
-                        price = float(match.group(1))
-                    timestamp = message.date.replace(tzinfo=timezone.utc)
+        for msg in messages:
+            if msg.message:
+                text = msg.message.upper()
+                if "GOLD BUY NOW" in text or "GOLD SELL NOW" in text:
+                    price_match = re.search(r'@ ?([\d.]+)', text)
+                    price = float(price_match.group(1)) if price_match else None
+                    timestamp = msg.date.replace(tzinfo=timezone.utc)
                     await client.disconnect()
-                    return msg, 'buy' if 'BUY' in msg else 'sell', price, timestamp
-
+                    signal = 'buy' if "BUY" in text else 'sell'
+                    return text, signal, price, timestamp
         await client.disconnect()
         return None, 'uncertain', None, None
     except Exception as e:
-        return f"error: {e}", 'error', None, None
+        return f"Error: {e}", 'error', None, None
 
 def get_latest_telegram_signal():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    message, signal, price, timestamp = loop.run_until_complete(fetch_telegram_signal())
+    msg, sig, price, time = loop.run_until_complete(fetch_telegram_signal())
     loop.close()
-    return message, signal, price, timestamp
+    return msg, sig, price, time
+
+# --- OpenAI GPT validation ---
+
+def gpt_validate_signal(message):
+    if not message or message.startswith("Error") or message == "None":
+        return "No valid message for GPT analysis."
+    prompt = (
+        "You are an expert trading assistant.\n"
+        "Analyze this Telegram message about Gold trading:\n"
+        f"\"\"\"\n{message}\n\"\"\"\n"
+        "Is this a clear, reliable trading signal? Provide a short rationale."
+    )
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=60,
+            temperature=0.5,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"GPT API error: {e}"
+
+# --- Classification & Confidence ---
 
 def classify_signal(rsi, macd_hist, telegram_signal):
     score = 0
-    if rsi < 30: score += 25
-    if macd_hist > 0: score += 25
-    if telegram_signal == "buy": score += 50
-    elif telegram_signal == "sell": score += 50
-    if telegram_signal == 'uncertain': return "Risk", score
-    return ("Trade" if score >= 75 else "Don't Trade"), score
+    rationale = []
 
-def log_signal(signal, rsi, macd, price, decision):
-    now = datetime.utcnow().isoformat()
-    row = pd.DataFrame([[now, signal, round(rsi,2), round(macd,4), price, decision]],
-                       columns=["timestamp", "signal", "RSI", "MACD", "entry_price", "decision"])
-    if os.path.exists(log_file):
-        row.to_csv(log_file, mode='a', header=False, index=False)
+    # RSI contribution
+    if rsi < 30:
+        score += 30
+        rationale.append("RSI < 30 suggests oversold (bullish) conditions.")
+    elif rsi > 70:
+        score -= 30
+        rationale.append("RSI > 70 suggests overbought (bearish) conditions.")
+
+    # MACD contribution
+    if macd_hist > 0:
+        score += 30
+        rationale.append("Positive MACD histogram indicates bullish momentum.")
     else:
-        row.to_csv(log_file, index=False)
+        score -= 30
+        rationale.append("Negative MACD histogram indicates bearish momentum.")
+
+    # Telegram signal contribution
+    if telegram_signal == 'buy':
+        score += 40
+        rationale.append("Telegram signal indicates BUY.")
+    elif telegram_signal == 'sell':
+        score -= 40
+        rationale.append("Telegram signal indicates SELL.")
+    else:
+        rationale.append("No clear Telegram trading signal.")
+
+    # Normalize score 0-100
+    score = max(0, min(100, score + 50))
+
+    # Decision threshold
+    if score >= 70:
+        decision = "Trade"
+    elif score >= 40:
+        decision = "Risk"
+    else:
+        decision = "Don't Trade"
+
+    return decision, score, rationale
+
+# --- Logging ---
+
+def log_signal(signal, rsi, macd, price, decision, confidence):
+    now = datetime.utcnow().isoformat()
+    row = pd.DataFrame([[now, signal, round(rsi,2), round(macd,4), price, decision, confidence]],
+                       columns=["timestamp", "signal", "RSI", "MACD", "entry_price", "decision", "confidence"])
+    if os.path.exists(LOG_FILE):
+        row.to_csv(LOG_FILE, mode='a', header=False, index=False)
+    else:
+        row.to_csv(LOG_FILE, index=False)
 
 def show_signal_history():
-    if os.path.exists(log_file):
-        df = pd.read_csv(log_file)
-        st.subheader("📜 Signal History")
+    if os.path.exists(LOG_FILE):
+        df = pd.read_csv(LOG_FILE)
+        st.subheader("📜 Signal History (Last 10)")
         st.dataframe(df.tail(10))
 
-# --- UI ---
-st.title("📈 XAU/USD AI Signal Bot")
+# --- Streamlit UI ---
 
-chart_week = fetch_chart_data(TRADINGVIEW_XAUUSD_FEED_WEEKLY)
-chart_hour = fetch_chart_data(TRADINGVIEW_XAUUSD_FEED_HOURLY)
-if chart_week.empty or chart_hour.empty:
-    st.error("❌ Failed to fetch chart data.")
+st.title("📈 XAU/USD AI Signal Bot with GPT Validation")
+
+# Fetch data
+weekly_df = fetch_chart_data(TWELVEDATA_WEEKLY)
+hourly_df = fetch_chart_data(TWELVEDATA_HOURLY)
+
+if weekly_df.empty or hourly_df.empty:
+    st.error("Failed to fetch price data. Please check API keys and internet connection.")
     st.stop()
 
+# Weekly candlestick chart
 st.subheader("Weekly Candlestick Chart")
-fig = go.Figure(data=[go.Candlestick(x=chart_week['date'],
-                                     open=chart_week['open'], high=chart_week['high'],
-                                     low=chart_week['low'], close=chart_week['close'])])
+fig = go.Figure(data=[go.Candlestick(
+    x=weekly_df['date'],
+    open=weekly_df['open'], high=weekly_df['high'],
+    low=weekly_df['low'], close=weekly_df['close']
+)])
 fig.update_layout(xaxis_rangeslider_visible=False)
-st.plotly_chart(fig)
+st.plotly_chart(fig, use_container_width=True)
 
-indicators = analyze_technical_indicators(chart_hour)
-st.write(f"**RSI (1H):** {indicators['RSI']:.2f}")
-st.write(f"**MACD Histogram (1H):** {indicators['MACD_HIST']:.4f}")
+# Indicators on hourly data
+rsi, macd_hist = analyze_technical_indicators(hourly_df)
+st.write(f"**RSI (1H):** {rsi:.2f}")
+st.write(f"**MACD Histogram (1H):** {macd_hist:.4f}")
 
-message, signal, entry_price, signal_time = get_latest_telegram_signal()
+# Get Telegram signal
+message, signal, price, signal_time = get_latest_telegram_signal()
+
 if signal == 'error':
-    st.error(f"Telegram error: {message}")
+    st.error(message)
 elif signal == 'uncertain':
-    st.warning("❗️ No 'Gold Buy now' or 'Gold Sell now' signal found in recent messages.")
+    st.warning("No recent 'Gold Buy now' or 'Gold Sell now' signal found in Telegram channel.")
 else:
     minutes_ago = int((datetime.utcnow().replace(tzinfo=timezone.utc) - signal_time).total_seconds() / 60)
-    decision, confidence = classify_signal(indicators['RSI'], indicators['MACD_HIST'], signal)
-    st.success(f"📢 Telegram Signal: {signal.upper()} @ {entry_price if entry_price else 'Unknown'}")
-    st.info(f"🕒 Sent {minutes_ago} minutes ago")
+    st.success(f"📢 Telegram Signal: **{signal.upper()}** at price: {price if price else 'Unknown'}")
+    st.info(f"Signal time: {signal_time.strftime('%Y-%m-%d %H:%M:%S UTC')} ({minutes_ago} minutes ago)")
     st.code(message)
 
-    st.header(f"🚦 Trade Decision: {decision}")
+    # Classify and get confidence
+    decision, confidence, rationale = classify_signal(rsi, macd_hist, signal)
+
+    st.header(f"🚦 Trade Decision: {decision} (Confidence: {confidence}%)")
+
+    st.subheader("Decision Rationale")
+    for line in rationale:
+        st.write("- " + line)
+
+    # GPT validation
+    st.subheader("GPT-4o-mini Signal Validation & Rationale")
+    gpt_result = gpt_validate_signal(message)
+    st.write(gpt_result)
+
+    # Confidence bar
     st.progress(confidence / 100)
 
-    log_signal(signal, indicators['RSI'], indicators['MACD_HIST'], entry_price, decision)
+    # Log signal for history
+    log_signal(signal, rsi, macd_hist, price, decision, confidence)
     show_signal_history()
