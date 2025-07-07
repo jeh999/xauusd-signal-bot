@@ -10,26 +10,32 @@ import re
 from datetime import datetime, timezone
 import openai
 import os
+from textblob import TextBlob
+
+# --- CONFIG --- #
+
+st.set_page_config(page_title="XAU/USD AI Signal Bot Plus", layout="wide")
 
 # Auto-refresh every 60 seconds
 st_autorefresh(interval=60000, limit=None, key="datarefresh")
 
-# Load API keys from Streamlit secrets
+# Load secrets
 TWELVEDATA_API_KEY = st.secrets["TWELVEDATA_API_KEY"]
 TELEGRAM_API_ID = int(st.secrets["TELEGRAM_API_ID"])
 TELEGRAM_API_HASH = st.secrets["TELEGRAM_API_HASH"]
 TELEGRAM_CHANNEL = 'Gary_TheTrader'  # without @
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+NEWS_API_KEY = st.secrets["NEWS_API_KEY"]
 openai.api_key = OPENAI_API_KEY
+
+LOG_FILE = "signal_log.csv"
 
 # API URLs
 TWELVEDATA_WEEKLY = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=1week&apikey={TWELVEDATA_API_KEY}"
 TWELVEDATA_HOURLY = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=1h&apikey={TWELVEDATA_API_KEY}"
+NEWS_API_URL = f"https://newsapi.org/v2/everything?q=gold+OR+XAUUSD&language=en&sortBy=publishedAt&apiKey={NEWS_API_KEY}"
 
-# Log file for signals
-LOG_FILE = "signal_log.csv"
-
-# --- Technical analysis functions ---
+# --- FUNCTIONS --- #
 
 def fetch_chart_data(url):
     res = requests.get(url)
@@ -62,13 +68,19 @@ def calculate_macd(series):
     macd_hist = macd - signal
     return macd_hist
 
+def calculate_atr(df, period=14):
+    df['H-L'] = df['high'] - df['low']
+    df['H-PC'] = abs(df['high'] - df['close'].shift(1))
+    df['L-PC'] = abs(df['low'] - df['close'].shift(1))
+    df['TR'] = df[['H-L', 'H-PC', 'L-PC']].max(axis=1)
+    atr = df['TR'].rolling(window=period).mean().iloc[-1]
+    return atr
+
 def analyze_technical_indicators(df):
     df['RSI'] = calculate_rsi(df['close'])
     df['MACD_HIST'] = calculate_macd(df['close'])
     last = df.iloc[-1]
     return last['RSI'], last['MACD_HIST']
-
-# --- Telegram functions ---
 
 async def fetch_telegram_signal():
     try:
@@ -76,7 +88,6 @@ async def fetch_telegram_signal():
         await client.start()
         channel = await client.get_entity(TELEGRAM_CHANNEL)
         messages = await client.get_messages(channel, limit=50)
-
         for msg in messages:
             if msg.message:
                 text = msg.message.upper()
@@ -99,74 +110,75 @@ def get_latest_telegram_signal():
     loop.close()
     return msg, sig, price, time
 
-# --- OpenAI GPT validation ---
+def fetch_news():
+    response = requests.get(NEWS_API_URL)
+    articles = response.json().get('articles', [])[:10]
+    return articles
 
-def gpt_validate_signal(message):
-    if not message or message.startswith("Error") or message == "None":
-        return "No valid message for GPT analysis."
-    prompt = (
-        "You are an expert trading assistant.\n"
-        "Analyze this Telegram message about Gold trading:\n"
-        f"\"\"\"\n{message}\n\"\"\"\n"
-        "Is this a clear, reliable trading signal? Provide a short rationale."
-    )
-    try:
-        response = openai.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=60,
-            temperature=0.5,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        return f"GPT API error: {e}"
+def analyze_news_sentiment(articles):
+    scores = []
+    for art in articles:
+        content = art.get('title', '') + ". " + art.get('description', '')
+        blob = TextBlob(content)
+        scores.append(blob.sentiment.polarity)
+    return np.mean(scores) if scores else 0
 
-# --- Classification & Confidence ---
+def detect_news_events(articles):
+    events_keywords = ['geopolitical', 'inflation', 'FED', 'war', 'sanction', 'conflict', 'crisis', 'demand', 'supply']
+    event_score = 0
+    for art in articles:
+        text = (art.get('title','') + " " + art.get('description','')).lower()
+        for kw in events_keywords:
+            if kw in text:
+                event_score += 1
+    return min(event_score / 5, 1)  # Normalize 0 to 1
 
-def classify_signal(rsi, macd_hist, telegram_signal):
-    score = 0
-    rationale = []
+def simple_lstm_predict_stub(df):
+    # Placeholder: you can integrate your trained model here
+    # Return price movement prediction between -1 and 1 (neg to pos)
+    return np.random.uniform(-1, 1)
 
-    # RSI contribution
+def classify_signal(rsi, macd_hist, telegram_signal, news_sentiment, news_event_score, lstm_pred, atr, risk_tolerance):
+    score = 50  # start at neutral 50
+
+    # RSI & MACD
     if rsi < 30:
-        score += 30
-        rationale.append("RSI < 30 suggests oversold (bullish) conditions.")
+        score += 10
     elif rsi > 70:
-        score -= 30
-        rationale.append("RSI > 70 suggests overbought (bearish) conditions.")
+        score -= 10
 
-    # MACD contribution
     if macd_hist > 0:
-        score += 30
-        rationale.append("Positive MACD histogram indicates bullish momentum.")
+        score += 10
     else:
-        score -= 30
-        rationale.append("Negative MACD histogram indicates bearish momentum.")
+        score -= 10
 
-    # Telegram signal contribution
+    # Telegram signal
     if telegram_signal == 'buy':
-        score += 40
-        rationale.append("Telegram signal indicates BUY.")
+        score += 15
     elif telegram_signal == 'sell':
-        score -= 40
-        rationale.append("Telegram signal indicates SELL.")
-    else:
-        rationale.append("No clear Telegram trading signal.")
+        score -= 15
 
-    # Normalize score 0-100
-    score = max(0, min(100, score + 50))
+    # News sentiment and event
+    score += news_sentiment * 20  # positive sentiment adds score
+    score += news_event_score * 10  # relevant news adds confidence
 
-    # Decision threshold
+    # LSTM prediction
+    score += lstm_pred * 15
+
+    # Adjust by ATR and risk tolerance (0 to 1)
+    if atr > 0:
+        volatility_factor = min(atr / 50, 1)  # Normalize ATR (example)
+        score -= volatility_factor * 10 * (1 - risk_tolerance)
+
+    # Clamp
+    score = max(0, min(100, score))
+
     if score >= 70:
-        decision = "Trade"
+        return "Trade", score
     elif score >= 40:
-        decision = "Risk"
+        return "Risk", score
     else:
-        decision = "Don't Trade"
-
-    return decision, score, rationale
-
-# --- Logging ---
+        return "Don't Trade", score
 
 def log_signal(signal, rsi, macd, price, decision, confidence):
     now = datetime.utcnow().isoformat()
@@ -188,21 +200,42 @@ def show_signal_history():
             return
         st.subheader("📜 Signal History (Last 10)")
         st.dataframe(df.tail(10))
-    except pd.errors.EmptyDataError:
-        st.info("Signal history file is empty.")
     except Exception as e:
         st.error(f"Error reading signal history: {e}")
 
-# --- Streamlit UI ---
+def gpt_validate_signal(message):
+    if not message or message.startswith("Error") or message == "None":
+        return "No valid message for GPT analysis."
+    prompt = (
+        "You are an expert trading assistant.\n"
+        "Analyze this Telegram message about Gold trading:\n"
+        f"\"\"\"\n{message}\n\"\"\"\n"
+        "Is this a clear, reliable trading signal? Provide a short rationale."
+    )
+    try:
+        response = openai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=60,
+            temperature=0.5,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"GPT API error: {e}"
 
-st.title("📈 XAU/USD AI Signal Bot with GPT Validation")
+# --- UI --- #
 
-# Fetch data
+st.title("🚀 XAU/USD AI Signal Bot Plus")
+
+# User risk tolerance slider
+risk_tolerance = st.slider("Select your risk tolerance (0 = very conservative, 1 = very aggressive):", 0.0, 1.0, 0.5)
+
+# Fetch charts
 weekly_df = fetch_chart_data(TWELVEDATA_WEEKLY)
 hourly_df = fetch_chart_data(TWELVEDATA_HOURLY)
 
 if weekly_df.empty or hourly_df.empty:
-    st.error("Failed to fetch price data. Please check API keys and internet connection.")
+    st.error("Failed to fetch price data.")
     st.stop()
 
 # Weekly candlestick chart
@@ -215,14 +248,17 @@ fig = go.Figure(data=[go.Candlestick(
 fig.update_layout(xaxis_rangeslider_visible=False)
 st.plotly_chart(fig, use_container_width=True)
 
-# Indicators on hourly data
+# Hourly indicators
 rsi, macd_hist = analyze_technical_indicators(hourly_df)
 st.write(f"**RSI (1H):** {rsi:.2f}")
 st.write(f"**MACD Histogram (1H):** {macd_hist:.4f}")
 
-# Get Telegram signal
-message, signal, price, signal_time = get_latest_telegram_signal()
+# ATR for risk management
+atr = calculate_atr(hourly_df)
+st.write(f"**ATR (1H):** {atr:.4f}")
 
+# Telegram signal
+message, signal, price, signal_time = get_latest_telegram_signal()
 if signal == 'error':
     st.error(message)
 elif signal == 'uncertain':
@@ -233,24 +269,30 @@ else:
     st.info(f"Signal time: {signal_time.strftime('%Y-%m-%d %H:%M:%S UTC')} ({minutes_ago} minutes ago)")
     st.code(message)
 
-    # Classify and get confidence
-    decision, confidence, rationale = classify_signal(rsi, macd_hist, signal)
+# News
+news_articles = fetch_news()
+news_sentiment = analyze_news_sentiment(news_articles)
+news_event_score = detect_news_events(news_articles)
+st.write(f"**News Sentiment:** {news_sentiment:.3f}")
+st.write(f"**News Event Score:** {news_event_score:.2f}")
 
-    st.header(f"🚦 Trade Decision: {decision} (Confidence: {confidence}%)")
+# LSTM prediction stub
+lstm_pred = simple_lstm_predict_stub(hourly_df)
+st.write(f"**LSTM Price Prediction (stub):** {lstm_pred:.3f} (pos = up, neg = down)")
 
-    st.subheader("Decision Rationale")
-    for line in rationale:
-        st.write("- " + line)
+# Classification
+decision, confidence = classify_signal(rsi, macd_hist, signal, news_sentiment, news_event_score, lstm_pred, atr, risk_tolerance)
+st.header(f"🚦 Trade Decision: {decision} (Confidence: {confidence:.1f}%)")
+st.progress(confidence / 100)
 
-    # GPT validation
+# GPT validation
+if message and not message.startswith("Error") and signal != 'uncertain':
     st.subheader("GPT-4o-mini Signal Validation & Rationale")
     gpt_result = gpt_validate_signal(message)
     st.write(gpt_result)
 
-    # Confidence bar
-    st.progress(confidence / 100)
-
-    # Log signal for history
+# Log
+if signal not in ['error', 'uncertain']:
     log_signal(signal, rsi, macd_hist, price, decision, confidence)
 
 show_signal_history()
