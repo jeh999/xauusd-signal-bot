@@ -131,3 +131,33 @@ elif decision == "Risk":
     st.warning("⚠️ Risky. Mixed or weak signals.")
 else:
     st.error("❌ Avoid trading now.")
+import asyncio
+from telethon import TelegramClient
+
+# Updated async code for fetching Telegram signal
+async def fetch_telegram_signal():
+    try:
+        client = TelegramClient('session_gary', TELEGRAM_API_ID, TELEGRAM_API_HASH)
+        await client.start()
+        channel = await client.get_entity(TELEGRAM_CHANNEL)
+        messages = await client.get_messages(channel, limit=10)
+        for message in messages:
+            msg = message.message.upper()
+            if 'XAUUSD' in msg:
+                if 'BUY' in msg:
+                    return 'buy'
+                elif 'SELL' in msg:
+                    return 'sell'
+                elif 'WAIT' in msg or 'AVOID' in msg:
+                    return 'uncertain'
+        return 'uncertain'
+    except Exception as e:
+        return f"error: {e}"
+
+# New function that properly manages the event loop
+def get_latest_telegram_signal():
+    loop = asyncio.new_event_loop()  # Create a new event loop
+    asyncio.set_event_loop(loop)  # Set it as the current event loop
+    signal = loop.run_until_complete(fetch_telegram_signal())  # Run the async function
+    loop.close()  # Close the loop after use
+    return signal
